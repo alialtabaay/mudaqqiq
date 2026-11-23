@@ -21,7 +21,7 @@ DATA_DIR = os.path.join(os.environ.get('LOCALAPPDATA') or os.path.expanduser('~/
 CACHE_DIR = os.path.join(DATA_DIR, 'cache')
 CONFIG_PATH = os.path.join(APP_DIR, 'config.json')
 LT_PORT = 8081
-VERSION = '1.4'
+VERSION = '1.5'
 
 DEFAULT_CONFIG = {
     "tesseract": "",          # يتعبى من التنصيب
@@ -763,31 +763,34 @@ def _ver(v):
     return tuple(int(x) for x in re.findall(r'\d+', str(v)))
 
 
+def _http_get(url, timeout=30):
+    import urllib.request
+    req = urllib.request.Request(url + ('&' if '?' in url else '?') + f't={int(time.time())}',
+                                 headers={'User-Agent': f'Mudaqqiq/{VERSION}', 'Cache-Control': 'no-cache'})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
 def check_update(cfg):
     """يرجّع معلومات التحديث إذا أكو نسخة أحدث على GitHub، وإلا None."""
-    import requests
     base = cfg.get('update_url') or UPDATE_BASE_DEFAULT
-    r = requests.get(base + 'version.json', timeout=10, headers={'Cache-Control': 'no-cache'})
-    r.raise_for_status()
-    info = r.json()
+    info = json.loads(_http_get(base + 'version.json', 10).decode('utf-8'))
     return info if _ver(info.get('version', '0')) > _ver(VERSION) else None
 
 
 def apply_update(cfg, info, log):
     """ينزّل الملفات الجديدة، يتأكد منها، ياخذ نسخة احتياطية، ويبدّل."""
-    import requests
     base = cfg.get('update_url') or UPDATE_BASE_DEFAULT
     tmp = tempfile.mkdtemp()
     files = info.get('files') or ['mudaqqiq.py']
     for name in files:
-        r = requests.get(base + name, timeout=60)
-        r.raise_for_status()
+        data = _http_get(base + name, 60)
         dst = os.path.join(tmp, name)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         with open(dst, 'wb') as f:
-            f.write(r.content)
+            f.write(data)
         if name.endswith('.py'):
-            compile(r.content.decode('utf-8'), name, 'exec')  # ما نبدّل بملف خربان
+            compile(data.decode('utf-8'), name, 'exec')  # ما نبدّل بملف خربان
     bak = os.path.join(APP_DIR, 'backup', VERSION)
     os.makedirs(bak, exist_ok=True)
     for name in files:
@@ -856,7 +859,7 @@ def gui():
         pass
     tbox = tk.Frame(header, bg=BRAND); tbox.pack(side='right', pady=12)
     tk.Label(tbox, text='مُدقِّق الملازم', bg=BRAND, fg='white', font=(F, 16, 'bold')).pack(anchor='e')
-    tk.Label(tbox, text='تدقيق إملائي ومطابقة ويّا الكتاب — بدون إنترنت', bg=BRAND, fg='#d8cff0',
+    tk.Label(tbox, text='تدقيق إملائي ومطابقة مع الكتاب الرسمي — بدون إنترنت', bg=BRAND, fg='#d8cff0',
              font=(F, 9)).pack(anchor='e')
     hl = tk.Frame(header, bg=BRAND); hl.pack(side='left', padx=18)
     upd_btn = ttk.Button(hl, text='⟳  تحديث البرنامج', style='Header.TButton')
@@ -990,13 +993,15 @@ def gui():
                 apply_update(cfg, info, log)
                 root.after(0, lambda: (messagebox.showinfo('تم التحديث', 'البرنامج راح ينفتح من جديد'), restart()))
             except Exception as e:
-                log(f'! Update failed: {e}')
-                root.after(0, lambda: (messagebox.showerror('فشل التحديث', str(e)), upd_btn.state(['!disabled'])))
+                msg = f'{type(e).__name__}: {e}'
+                log(f'! Update failed: {msg}')
+                root.after(0, lambda: (messagebox.showerror('فشل التحديث', msg), upd_btn.state(['!disabled'])))
         threading.Thread(target=w, daemon=True).start()
 
     def restart():
         try:
-            subprocess.Popen([sys.executable, os.path.abspath(__file__)], cwd=APP_DIR)
+            exe = os.path.join(APP_DIR, 'venv', 'Scripts', 'pythonw.exe')
+            subprocess.Popen([exe if os.path.exists(exe) else sys.executable, os.path.abspath(__file__)], cwd=APP_DIR)
         finally:
             root.destroy()
 
@@ -1005,8 +1010,9 @@ def gui():
             try:
                 info = check_update(cfg)
             except Exception as e:
+                msg = f'{type(e).__name__}: {e}'
                 if manual:
-                    root.after(0, lambda: messagebox.showwarning('التحديث', f'ما گدرت أتصل بالسيرفر\n(يحتاج إنترنت)\n\n{e}'))
+                    root.after(0, lambda: messagebox.showwarning('التحديث', f'ما گدرت أتصل بالسيرفر\n(يحتاج إنترنت)\n\n{msg}'))
                 return
             if info:
                 root.after(0, lambda: (upd_btn.configure(text=f'⬆  تحديث متوفر v{info.get("version")}'),
@@ -1020,7 +1026,22 @@ def gui():
     root.mainloop()
 
 
+def _ensure_venv():
+    """إذا انفتح البرنامج ببايثون ثاني (مثلاً دبل كلك على الملف)، نعيد فتحه بالـvenv مال البرنامج
+    لأن المكتبات (PyMuPDF, pytesseract...) منصبة هناك بس."""
+    if os.name != 'nt':
+        return
+    venv = os.path.join(APP_DIR, 'venv')
+    if not os.path.isdir(venv) or os.path.normcase(os.path.abspath(sys.prefix)) == os.path.normcase(venv):
+        return
+    exe = os.path.join(venv, 'Scripts', 'pythonw.exe' if len(sys.argv) == 1 else 'python.exe')
+    if os.path.exists(exe):
+        subprocess.Popen([exe, os.path.abspath(__file__)] + sys.argv[1:], cwd=APP_DIR)
+        sys.exit(0)
+
+
 def main():
+    _ensure_venv()
     if len(sys.argv) == 1:
         return gui()
     ap = argparse.ArgumentParser(description='مُدقِّق الطابعي — تدقيق أوفلاين')

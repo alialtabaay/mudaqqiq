@@ -1,5 +1,11 @@
 {
-  "version": "1.4",
-  "files": ["mudaqqiq.py", "logo.png", "logo_white.png", "icon.png", "icon.ico"],
-  "notes": "واجهة جديدة بثيمة الطابعي، زر تحديث تلقائي، قراءة الكتب أسرع، وإيقاف تدقيق العربي التجريبي افتراضياً."
+  "version": "1.5",
+  "files": [
+    "mudaqqiq.py",
+    "logo.png",
+    "logo_white.png",
+    "icon.png",
+    "icon.ico"
+  ],
+  "notes": "إصلاح: البرنامج صار يشتغل دائماً بمكتباته الخاصة (سبب خطأ الملف غير موجود)، وإصلاح زر التحديث."
 }
