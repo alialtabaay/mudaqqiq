@@ -21,7 +21,7 @@ DATA_DIR = os.path.join(os.environ.get('LOCALAPPDATA') or os.path.expanduser('~/
 CACHE_DIR = os.path.join(DATA_DIR, 'cache')
 CONFIG_PATH = os.path.join(APP_DIR, 'config.json')
 LT_PORT = 8081
-VERSION = '1.5'
+VERSION = '1.6'
 
 DEFAULT_CONFIG = {
     "tesseract": "",          # يتعبى من التنصيب
@@ -803,6 +803,69 @@ def apply_update(cfg, info, log):
     log(f'Updated to v{info.get("version")} (backup in backup\\{VERSION})')
 
 
+# ---------------------------------------------------------------- drag & drop / paste helpers
+def clipboard_files():
+    """الملفات المنسوخة من مستكشف الويندوز (Ctrl+C على ملف) — CF_HDROP."""
+    if os.name != 'nt':
+        return []
+    import ctypes
+    from ctypes import wintypes
+    u32, s32 = ctypes.windll.user32, ctypes.windll.shell32
+    u32.GetClipboardData.restype = wintypes.HANDLE
+    s32.DragQueryFileW.argtypes = [wintypes.HANDLE, wintypes.UINT, wintypes.LPWSTR, wintypes.UINT]
+    files = []
+    if not u32.OpenClipboard(None):
+        return files
+    try:
+        h = u32.GetClipboardData(15)  # CF_HDROP
+        if h:
+            n = s32.DragQueryFileW(h, 0xFFFFFFFF, None, 0)
+            for i in range(n):
+                ln = s32.DragQueryFileW(h, i, None, 0) + 1
+                buf = ctypes.create_unicode_buffer(ln)
+                s32.DragQueryFileW(h, i, buf, ln)
+                files.append(buf.value)
+    finally:
+        u32.CloseClipboard()
+    return files
+
+
+def paths_from_text(t):
+    """مسارات منسوخة كنص (مثل Copy as path) — سطر لكل مسار، مع أو بدون علامات تنصيص."""
+    out = []
+    for line in (t or '').splitlines():
+        for m in re.findall(r'"([^"]+)"|(\S.*\S)', line.strip()):
+            p = (m[0] or m[1]).strip().strip('"')
+            if os.path.exists(p):
+                out.append(p)
+    return out
+
+
+def ensure_dnd_lib(log):
+    """tkinterdnd2 تفعّل السحب والإفلات. إذا ناقصة نصبها بالخلفية (تحتاج إنترنت مرة وحدة)."""
+    try:
+        import tkinterdnd2  # noqa
+        return True
+    except ImportError:
+        pass
+    py = os.path.join(os.path.dirname(sys.executable), 'python.exe' if os.name == 'nt' else 'python3')
+    if not os.path.exists(py):
+        py = sys.executable
+
+    def w():
+        try:
+            r = subprocess.run([py, '-m', 'pip', 'install', '-q', 'tkinterdnd2'], capture_output=True, text=True,
+                               timeout=300, creationflags=0x08000000 if os.name == 'nt' else 0)
+            if r.returncode == 0:
+                log('Drag & drop installed - reopen the program to activate it.')
+            else:
+                log('! Could not install drag & drop (needs internet once). Ctrl+V paste still works.')
+        except Exception as e:
+            log(f'! Drag & drop install failed: {e}')
+    threading.Thread(target=w, daemon=True).start()
+    return False
+
+
 # ---------------------------------------------------------------- GUI
 BRAND = '#4a2c82'; BRAND_DARK = '#3a2268'; BRAND_LIGHT = '#efe9f8'
 BG = '#f6f5fa'; CARD = '#ffffff'; TEXT = '#22202a'; MUTED = '#6b6880'; OK = '#1e8e3e'
@@ -812,7 +875,13 @@ def gui():
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
     cfg = load_config()
-    root = tk.Tk()
+    try:
+        from tkinterdnd2 import TkinterDnD, DND_FILES
+        root = TkinterDnD.Tk()
+        has_dnd = True
+    except Exception:
+        root = tk.Tk()
+        has_dnd = False
     root.title(f'مُدقِّق الطابعي  v{VERSION}')
     root.geometry('980x720'); root.minsize(860, 640)
     root.configure(bg=BG)
@@ -884,7 +953,7 @@ def gui():
     books = list(cfg.get('last_books', []))
     books = [b for b in books if os.path.exists(b)]
 
-    c1 = card(body, 'الملفات', 'اختار الملزمة والكتب الرسمية للمادة نفسها')
+    c1 = card(body, 'الملفات', 'اسحب الملفات وأفلتها هنا، أو انسخها (Ctrl+C) والصقها بالبرنامج (Ctrl+V)، أو اختار يدوياً')
 
     def row(c, r, label, var, cmd):
         ttk.Label(c, text=label, style='Card.TLabel').grid(row=r, column=2, sticky='e', padx=(10, 0), pady=5)
@@ -980,6 +1049,63 @@ def gui():
                 root.after(0, lambda: btn.state(['!disabled']))
         threading.Thread(target=work, daemon=True).start()
     btn.configure(command=start)
+
+    # ---------- drag & drop / paste
+    def classify(paths, target=None):
+        """يوزّع الملفات: ملزمة / كتب / لوگو / مجلد حفظ."""
+        pdfs = [p for p in paths if p.lower().endswith('.pdf')]
+        imgs = [p for p in paths if p.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        dirs = [p for p in paths if os.path.isdir(p)]
+        added = []
+        for p in pdfs:
+            name = os.path.basename(p).lower()
+            is_book = target == 'books' or (target != 'malzama' and
+                       any(k in name for k in ('كتاب', 'book', 'نشاط', 'activity', 'pupil', 'طالب')))
+            if not is_book and (target == 'malzama' or not v_m.get() or 'ملزم' in name):
+                v_m.set(p); added.append('الملزمة')
+            elif p not in books:
+                books.append(p); lb.insert('end', os.path.basename(p)); added.append('كتاب')
+        if imgs:
+            v_l.set(imgs[0]); added.append('اللوگو')
+        if dirs:
+            v_o.set(dirs[0]); added.append('مجلد الحفظ')
+        if added:
+            set_status('تمت الإضافة: ' + '، '.join(added))
+        elif paths:
+            set_status('الملف مو PDF ولا صورة')
+
+    def on_paste(event=None):
+        w = root.focus_get()
+        files = clipboard_files()
+        if not files:
+            try:
+                files = paths_from_text(root.clipboard_get())
+            except Exception:
+                files = []
+        if files:
+            classify(files)
+            return 'break'  # ما نلصق النص داخل الحقل
+        return None
+
+    root.bind_all('<Control-v>', on_paste)
+    root.bind_all('<Control-V>', on_paste)
+
+    if has_dnd:
+        def drop_handler(target):
+            def h(e):
+                classify(list(root.tk.splitlist(e.data)), target)
+                return e.action
+            return h
+        for widget, target in ((root, None), (lb, 'books')):
+            widget.drop_target_register(DND_FILES)
+            widget.dnd_bind('<<Drop>>', drop_handler(target))
+        for child in c1.winfo_children():
+            if isinstance(child, ttk.Entry):
+                child.drop_target_register(DND_FILES)
+                child.dnd_bind('<<Drop>>', drop_handler('malzama'))
+                break
+    else:
+        ensure_dnd_lib(log)
 
     # ---------- updates
     def do_update(info):
