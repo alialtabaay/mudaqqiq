@@ -21,7 +21,7 @@ DATA_DIR = os.path.join(os.environ.get('LOCALAPPDATA') or os.path.expanduser('~/
 CACHE_DIR = os.path.join(DATA_DIR, 'cache')
 CONFIG_PATH = os.path.join(APP_DIR, 'config.json')
 LT_PORT = 8081
-VERSION = '1.6'
+VERSION = '1.7'
 
 DEFAULT_CONFIG = {
     "tesseract": "",          # يتعبى من التنصيب
@@ -1087,8 +1087,13 @@ def gui():
             return 'break'  # ما نلصق النص داخل الحقل
         return None
 
+    def on_ctrl_key(e):
+        # keycode 86 = حرف V بأي لغة كيبورد (حتى لو الكيبورد عربي وCtrl+V تطلع «ر»)
+        if e.keycode == 86 and e.keysym.lower() != 'v':
+            return on_paste(e)
     root.bind_all('<Control-v>', on_paste)
     root.bind_all('<Control-V>', on_paste)
+    root.bind_all('<Control-Key>', on_ctrl_key, add='+')
 
     if has_dnd:
         def drop_handler(target):
